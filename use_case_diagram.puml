@@ -1,0 +1,34 @@
+!pragma charset UTF-8
+
+@startuml UseCaseDiagram_Fact_Check_System
+!theme plain
+
+' --- 解決字體缺失問題的關鍵指令 ---
+skinparam defaultFontName "Microsoft JhengHei"
+
+title 事實查核系統 - 使用案例圖
+
+left to right direction
+
+actor "一般使用者" as user
+rectangle "事實查核與假訊息偵測系統" {
+  user -- (查核文字訊息)
+  user -- (查核網址連結)
+  user -- (查核圖片)
+  user -- (查核影片)
+
+  (查核圖片) ..> (呼叫 IsItAI 服務) : <<extends>>
+  (查核影片) ..> (呼叫 Sightengine 服務) : <<extends>>
+  (查核網址連結) ..> (呼叫 Google Web Risk 服務) : <<extends>>
+  (查核文字訊息) ..> (呼叫 Google Fact Check 服務) : <<extends>>
+}
+
+actor "Google 服務" as google <<service>>
+actor "AI 偵測服務" as ai_service <<service>>
+
+(呼叫 Google Web Risk 服務) -- google
+(呼叫 Google Fact Check 服務) -- google
+(呼叫 IsItAI 服務) -- ai_service
+(呼叫 Sightengine 服務) -- ai_service
+
+@enduml
