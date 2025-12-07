@@ -9,55 +9,99 @@ import os
 
 app = FastAPI()
 
-# --- 1. 載入模型 ---
-print("正在載入 AI 偵測模型，請稍候...")
-# 改回這個模型，它的通用性較好，對非寫實圖片的誤判率稍微低一點
-model_name = "umm-maybe/AI-image-detector"
-detector = pipeline("image-classification", model=model_name)
-print("模型載入完成！")
+# --- 1. 載入模型與工具 ---
+print("正在載入 Deepfake 偵測模型與人臉辨識工具，請稍候...")
 
-# --- 圖片偵測邏輯 ---
-def predict_image(image: Image.Image):
-    results = detector(image)
-    # results 範例: [{'label': 'artificial', 'score': 0.99}, {'label': 'human', 'score': 0.01}]
+# 使用針對 Deepfake/Face Swap 的模型
+model_name = "dima806/deepfake_vs_real_image_detection"
+detector = pipeline("image-classification", model=model_name)
+
+# 載入 OpenCV 的人臉偵測器
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+print("模型與工具載入完成！")
+
+# --- 核心邏輯：輔助函式 ---
+def analyze_single_face_prob(pil_image):
+    """
+    針對單一圖片(或裁切後的臉)進行 AI 預測
+    """
+    results = detector(pil_image)
     
-    ai_score = 0.0
+    fake_prob = 0.0
     for res in results:
-        label = res['label'].lower()
-        # 累積所有代表 AI 的標籤分數
-        if 'ai' in label or 'fake' in label or 'artificial' in label:
-            ai_score = res['score']
+        label = res['label'].upper()
+        score = res['score']
+        
+        if label in ['FAKE', 'AI', 'ARTIFICIAL', 'DEEPFAKE']:
+            fake_prob = score
             break
-        # 如果模型回傳的是 'human' 或 'real'，那 AI 分數就是 1.0 - real
-        if 'real' in label or 'human' in label:
-            ai_score = 1.0 - res['score']
+        
+        if label in ['REAL', 'HUMAN']:
+            fake_prob = 1.0 - score
             
-    return ai_score
+    return fake_prob
+
+# --- 核心邏輯：圖片預測 (含人臉偵測) ---
+def predict_image(image: Image.Image):
+    # 轉 OpenCV 格式
+    img_np = np.array(image)
+    if len(img_np.shape) == 2:
+        img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
+        
+    open_cv_image = img_np[:, :, ::-1].copy() # RGB to BGR
+    gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
+
+    # 偵測人臉
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(30, 30)
+    )
+
+    # A: 無臉，分析全圖
+    if len(faces) == 0:
+        return analyze_single_face_prob(image)
+
+    # B: 有臉，切臉分析
+    max_fake_score = 0.0
+    
+    for (x, y, w, h) in faces:
+        margin = int(w * 0.1)
+        x_start = max(0, x - margin)
+        y_start = max(0, y - margin)
+        x_end = min(image.width, x + w + margin)
+        y_end = min(image.height, y + h + margin)
+
+        face_crop = image.crop((x_start, y_start, x_end, y_end))
+        score = analyze_single_face_prob(face_crop)
+        
+        if score > max_fake_score:
+            max_fake_score = score
+
+    return max_fake_score
 
 # --- API: 圖片偵測 ---
 @app.post("/detect/image")
 async def detect_image_endpoint(file: UploadFile = File(...)):
     try:
-        # 讀取上傳的圖片
         image_data = await file.read()
         image = Image.open(io.BytesIO(image_data)).convert("RGB")
         
-        # 進行預測 (取得 AI 的機率，例如 0.15)
         ai_probability = predict_image(image)
         
-        # --- 修正判定與回傳邏輯 ---
         if ai_probability > 0.5:
-            label = "AI"
-            display_prob = ai_probability # 如果是 AI，顯示 AI 的機率 (例如 90%)
+            label = "AI/Deepfake"
+            display_prob = ai_probability 
         else:
             label = "Real"
-            display_prob = 1.0 - ai_probability # 如果是真人，顯示真人的機率 (1 - 0.15 = 0.85 即 85%)
+            display_prob = 1.0 - ai_probability 
 
-        # 回傳格式
         return {
             "status": "success",
             "predicted_label": label,
-            "probability": display_prob # 這裡回傳修正後的數值
+            "probability": display_prob
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -65,7 +109,10 @@ async def detect_image_endpoint(file: UploadFile = File(...)):
 # --- API: 影片偵測 ---
 @app.post("/detect/video")
 async def detect_video_endpoint(file: UploadFile = File(...)):
-    temp_filename = f"temp_{file.filename}"
+    # 確保只取檔名，避免路徑錯誤
+    safe_filename = os.path.basename(file.filename)
+    temp_filename = f"temp_{safe_filename}"
+    
     try:
         with open(temp_filename, "wb") as buffer:
             buffer.write(await file.read())
@@ -93,12 +140,13 @@ async def detect_video_endpoint(file: UploadFile = File(...)):
                 
                 prob = predict_image(pil_image)
                 total_frames_checked += 1
-                if prob > 0.6: 
+                
+                if prob > 0.7: 
                     ai_frames += 1
             
             frame_count += 1
             
-            if total_frames_checked >= 30:
+            if total_frames_checked >= 60:
                 break
 
         cap.release()
@@ -110,15 +158,21 @@ async def detect_video_endpoint(file: UploadFile = File(...)):
         return {
             "status": "success",
             "deepfake": {
-                "prob": final_prob
-            }
+                "prob": final_prob,
+                "frames_checked": total_frames_checked,
+                "fake_frames": ai_frames
+            },
+            "debug_output": f"Checked {total_frames_checked} frames, found {ai_frames} suspicious frames."
         }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
         if os.path.exists(temp_filename):
-            os.remove(temp_filename)
+            try:
+                os.remove(temp_filename)
+            except:
+                pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
