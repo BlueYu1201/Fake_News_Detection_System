@@ -116,6 +116,45 @@ function clearUserState(string $userId): void { $states = file_exists(USER_STATE
 function check_url_existence(string $url): bool { $ch = curl_init($url); curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); curl_setopt($ch, CURLOPT_NOBODY, true); curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10); curl_setopt($ch, CURLOPT_TIMEOUT, 15); curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false); curl_exec($ch); if (curl_errno($ch)) { ($ch); return false; } $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE); ($ch); return ($http_code < 400); }
 function check_url_safety(string $url, string $apiKey): array { $queryParams = http_build_query(['key' => $apiKey, 'uri' => $url]); $threatTypes = ['MALWARE', 'SOCIAL_ENGINEERING', 'UNWANTED_SOFTWARE']; foreach ($threatTypes as $type) { $queryParams .= '&threatTypes=' . urlencode($type); } $apiUrl = 'https://webrisk.googleapis.com/v1/uris:search?' . $queryParams; $response = make_curl_request($apiUrl); if ($response === false) { return ['error' => '無法連接至 Google Web Risk API。']; } $data = json_decode($response, true); if (isset($data['error'])) { return ['error' => $data['error']['message']]; } if (isset($data['threat'])) { return ['safe' => false, 'threat_type' => $data['threat']['threatTypes'][0] ?? 'UNKNOWN']; } return ['safe' => true]; }
 
+// --- 新增：處理熱門議題的函式 ---
+function handle_hot_topics_response(string|false $apiResponse, string $targetId, LINEBot $bot): void {
+    if ($apiResponse === false) {
+        $bot->pushMessage($targetId, new TextMessageBuilder("無法連接至資料庫取得熱門議題。"));
+        return;
+    }
+    
+    $data = json_decode($apiResponse, true);
+    if (!is_array($data) || isset($data['error'])) {
+        $bot->pushMessage($targetId, new TextMessageBuilder("讀取錯誤：" . ($data['error'] ?? '未知')));
+        return;
+    }
+
+    if (!isset($data['hot_topics']) || empty($data['hot_topics'])) {
+        $bot->pushMessage($targetId, new TextMessageBuilder("目前沒有熱門查核資料。"));
+        return;
+    }
+
+    $msg = "🔥 最近 10 則熱門查核議題：\n";
+    $i = 1;
+    foreach ($data['hot_topics'] as $topic) {
+        // 簡短顯示標題，避免訊息太長
+        $text = mb_substr($topic['claim_text'], 0, 30) . '...';
+        $rating = $topic['rating'];
+        $score = $topic['reliability_score'] ?? -1;
+        
+        $msg .= "\n{$i}. [{$rating}] {$text}";
+        if ($score !== -1) {
+             // 簡單顯示分數
+             $msg .= " (可信度:{$score}%)";
+        }
+        $i++;
+    }
+    $msg .= "\n\n💡 提示：輸入「查一下 + 關鍵字」可搜尋更多細節。";
+
+    $bot->pushMessage($targetId, new TextMessageBuilder($msg));
+}
+// ------------------------------
+
 function handle_image_analysis_response(string|false $apiResponse, string $targetId, LINEBot $bot): void {
     if ($apiResponse === false) {
         $bot->pushMessage($targetId, new TextMessageBuilder("抱歉，圖片偵測服務暫時無法連線。"));
@@ -148,6 +187,13 @@ function handle_image_analysis_response(string|false $apiResponse, string $targe
         $msg .= "\n---\n🔍 文字查核結果：\n";
         $claim = $factData['claims'][0];
         $msg .= "評等：「{$claim['claimReview'][0]['textualRating']}」\n";
+        
+        $relScore = $claim['reliability_score'] ?? -1;
+        $relLabel = $claim['risk_label'] ?? '';
+        if ($relScore !== -1) {
+            $msg .= "📊 可信度：{$relScore}% - {$relLabel}\n";
+        }
+        
         $msg .= "連結：{$claim['claimReview'][0]['url']}";
     }
 
@@ -196,7 +242,7 @@ if (is_array($events) && !empty($events['events'])) {
             $replyToken = $event['replyToken'];
             $source = $event['source'];
             $userId = $source['userId'];
-            $apiUrl = 'https://a9c5958fe6e2.ngrok-free.app/api.php';
+            $apiUrl = 'https://6d8fb93691c1.ngrok-free.app/api.php';
             $userState = getUserState($userId);
             $targetId = isset($source['groupId']) ? $source['groupId'] : $userId;
 
@@ -246,7 +292,10 @@ if (is_array($events) && !empty($events['events'])) {
                     $bot->replyText($replyToken, '機器人已連線成功!');
                     continue;
                 }
-                
+                if ($trimmedUserMessage === '網站') {
+                    $bot->replyText($replyToken, 'https://6d8fb93691c1.ngrok-free.app/');
+                    continue;
+                }
                 if (has_image_trigger($userMessage)) {
                     setUserState($userId, 'awaiting_image');
                     $bot->replyText($replyToken, '請傳送圖片。');
@@ -270,12 +319,26 @@ if (is_array($events) && !empty($events['events'])) {
                     }
                     continue;
                 }
+
+                // --- 處理「熱門議題」的觸發 ---
+                if ($trimmedUserMessage === '熱門議題' || $trimmedUserMessage === '熱門搜尋' || $trimmedUserMessage === '熱門') {
+                    $bot->replyText($replyToken, '正在獲取熱門查核資料...');
+                    $postData = ['action' => 'get_hot_searches'];
+                    $apiResponse = make_curl_request($apiUrl, $postData);
+                    handle_hot_topics_response($apiResponse, $targetId, $bot);
+                    continue;
+                }
                 
-                // 處理「查一下」文字查核 (這段是新增修復的部分)
+                // 處理「查一下」文字查核
                 if (should_process_fact_check($userMessage)) {
                     $query = cleanup_message_for_query($userMessage);
+                    
+                    // 修改：如果「查一下」後面是空的，也顯示熱門議題
                     if (empty($query)) {
-                        $bot->replyText($replyToken, '請在「查一下」後面輸入想查詢的內容。');
+                        $bot->replyText($replyToken, "您輸入了「查一下」但未指定內容，以下是最近的熱門議題：");
+                        $postData = ['action' => 'get_hot_searches'];
+                        $apiResponse = make_curl_request($apiUrl, $postData);
+                        handle_hot_topics_response($apiResponse, $targetId, $bot);
                         continue;
                     }
                     
@@ -290,7 +353,6 @@ if (is_array($events) && !empty($events['events'])) {
                     
                     $data = json_decode($apiResponse, true);
                     
-                    // 解析回應並格式化
                     if (isset($data['claims']) && is_array($data['claims']) && count($data['claims']) > 0) {
                         $replyMsg = "🔍 關於「{$query}」的查核結果：\n";
                         $count = 0;
@@ -301,9 +363,15 @@ if (is_array($events) && !empty($events['events'])) {
                             $rating = $claim['claimReview'][0]['textualRating'] ?? '未評等';
                             $url = $claim['claimReview'][0]['url'] ?? '';
                             
+                            $relScore = $claim['reliability_score'] ?? -1;
+                            $relLabel = $claim['risk_label'] ?? '';
+
                             $replyMsg .= "\n----------------\n";
                             $replyMsg .= "📢 陳述：{$title}\n";
                             $replyMsg .= "⚖️ 評等：{$rating}\n";
+                            if ($relScore !== -1) {
+                                $replyMsg .= "📊 可信度：{$relScore}% - {$relLabel}\n";
+                            }
                             $replyMsg .= "🔗 詳情：{$url}\n";
                             $count++;
                         }
@@ -315,7 +383,7 @@ if (is_array($events) && !empty($events['events'])) {
                     continue;
                 }
 
-                // 網址檢查 (保持在最後，避免誤判)
+                // 網址檢查
                 preg_match('/(https?:\/\/[^\s]+)/', $userMessage, $matches);
                 if (isset($matches[0])) {
                     $urlToCheck = $matches[0];
