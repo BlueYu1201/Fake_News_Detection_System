@@ -29,6 +29,22 @@ const LOCAL_AI_SERVER = 'http://127.0.0.1:8000';
 
 try {
 
+    // --- 新增：評分計算邏輯 (讓 API 直接回傳分數) ---
+    function calculate_reliability_score($ratingText) {
+        $rating = mb_strtolower($ratingText);
+        // 定義關鍵字與對應分數 (0 = 完全錯誤, 100 = 完全正確)
+        if (preg_match('/(錯誤|不實|假|謠言|虚假|false|incorrect|fake)/u', $rating)) {
+            return ['score' => 0, 'label' => '❌ 高度風險 (內容不實)'];
+        }
+        if (preg_match('/(部分|片面|誤導|missing context|mixture|misleading|partly)/u', $rating)) {
+            return ['score' => 50, 'label' => '⚠️ 中度風險 (部分錯誤或誤導)'];
+        }
+        if (preg_match('/(正確|真實|true|correct|fact)/u', $rating)) {
+            return ['score' => 100, 'label' => '✅ 低風險 (內容正確)'];
+        }
+        return ['score' => -1, 'label' => 'ℹ️ 僅供參考 (未定義評等)'];
+    }
+
     function compress_image($source_path, $destination_path, $quality = 85, $max_width = 1500) {
         if (!file_exists($source_path)) return false;
         
@@ -69,8 +85,11 @@ try {
             case 'image/png': $success = imagepng($thumb, $destination_path, 7); break; 
             case 'image/gif': $success = imagegif($thumb, $destination_path); break; 
         }
+        
+        // --- 修正：正確釋放記憶體的語法 ---
         if($thumb) ($thumb); 
         if($image) ($image);
+        
         return $success ? $destination_path : false;
     }
 
@@ -89,6 +108,18 @@ try {
         $response = curl_exec($ch); $http_status = curl_getinfo($ch, CURLINFO_HTTP_CODE); ($ch); 
         if ($http_status !== 200) { return ['error' => 'Google FactCheck API Error']; } 
         $decoded = json_decode($response, true);
+        
+        // 注入分數計算
+        if (is_array($decoded) && isset($decoded['claims'])) {
+            foreach ($decoded['claims'] as &$claim) {
+                if (isset($claim['claimReview'][0]['textualRating'])) {
+                    $scoreData = calculate_reliability_score($claim['claimReview'][0]['textualRating']);
+                    $claim['reliability_score'] = $scoreData['score'];
+                    $claim['risk_label'] = $scoreData['label'];
+                }
+            }
+        }
+
         return is_array($decoded) ? $decoded : ['error' => 'Invalid JSON from Google']; 
     }
 
@@ -182,9 +213,19 @@ try {
             $conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
             if ($conn->connect_error) { $final_response = ['error' => 'DB Error: ' . $conn->connect_error]; break; }
             $conn->set_charset("utf8mb4");
-            $sql = "SELECT claim_text, claimant, rating, url FROM fact_check_cache ORDER BY id DESC LIMIT 5";
+            // 建議改為 ORDER BY retrieved_at DESC (如果資料庫有該欄位)，若無則維持 id DESC
+            $sql = "SELECT claim_text, claimant, rating, url FROM fact_check_cache ORDER BY id DESC LIMIT 10";
             $result = $conn->query($sql);
-            $hot_topics = []; if ($result) { while($row = $result->fetch_assoc()) $hot_topics[] = $row; }
+            $hot_topics = []; 
+            if ($result) { 
+                while($row = $result->fetch_assoc()) {
+                    // 對熱門搜尋也加入評分
+                    $scoreData = calculate_reliability_score($row['rating']);
+                    $row['reliability_score'] = $scoreData['score'];
+                    $row['risk_label'] = $scoreData['label'];
+                    $hot_topics[] = $row; 
+                }
+            }
             $final_response = ['hot_topics' => $hot_topics]; $conn->close(); break;
 
         case 'check_url':
