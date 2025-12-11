@@ -17,12 +17,16 @@ document.addEventListener('DOMContentLoaded', function() {
     function startProgressSimulation() { if(progressOverlay) progressOverlay.style.display = 'flex'; }
     function completeProgress() { if(progressOverlay) progressOverlay.style.display = 'none'; }
 
+    // 載入熱門搜尋
     fetch('api.php', { method: 'POST', body: new URLSearchParams('action=get_hot_searches') })
     .then(r => r.json())
     .then(d => {
         if(d.hot_topics && hotSearchSelect) {
             hotSearchSelect.innerHTML = '<option disabled selected>--- 選擇熱門議題 ---</option>';
-            d.hot_topics.forEach(t => hotSearchSelect.innerHTML += `<option value="${t.claim_text}">[${t.rating}] ${t.claim_text.substr(0,20)}...</option>`);
+            d.hot_topics.forEach(t => {
+                // 如果 API 有回傳分數，可以用來決定顏色，這裡先維持簡單顯示
+                hotSearchSelect.innerHTML += `<option value="${t.claim_text}">[${t.rating}] ${t.claim_text.substr(0,20)}...</option>`;
+            });
         }
     })
     .catch(e => console.error(e));
@@ -33,17 +37,51 @@ document.addEventListener('DOMContentLoaded', function() {
         const q = queryInput.value.trim(); if(!q) return;
         resultsContainer.innerHTML = '<div class="info">查詢中...</div>';
         const fd = new FormData(); fd.append('action','search'); fd.append('query',q); fd.append('language', languageSelect.value);
+        
         fetch('api.php', {method:'POST', body:fd}).then(r => r.json()).then(d => {
             if (d.error) { resultsContainer.innerHTML = `<div class="error">${d.error}</div>`; return; }
+            
             if(d.claims && d.claims.length){
                 let h = '<h3>🔍 查核結果</h3>';
-                d.claims.slice(0,3).forEach(c=>{
+                d.claims.slice(0,3).forEach(c => {
                     const rating = c.claimReview[0].textualRating;
-                    const color = (rating.includes('不實') || rating.includes('錯誤')) ? 'rating-false' : 'rating-true';
-                    h += `<div class="claim"><p><strong>陳述：</strong>${c.text}</p><p><strong>評等：</strong><span class="${color}">${rating}</span></p><a href="${c.claimReview[0].url}" target="_blank">詳情</a></div>`;
+                    const url = c.claimReview[0].url;
+                    
+                    // --- 新增：讀取可信度分數 ---
+                    const score = c.reliability_score !== undefined ? c.reliability_score : -1;
+                    const label = c.risk_label || '';
+                    
+                    let scoreHtml = '';
+                    if (score !== -1) {
+                        // 設定顏色：低分(假)=紅, 中分=黃, 高分(真)=綠
+                        let barColor = score < 40 ? '#e74c3c' : (score < 80 ? '#f1c40f' : '#2ecc71');
+                        scoreHtml = `
+                        <div style="margin: 8px 0;">
+                            <div style="display:flex; justify-content:space-between; font-size:0.9em; margin-bottom:2px;">
+                                <span>📊 預估可信度：<strong>${score}%</strong></span>
+                                <span style="color:${barColor}">${label}</span>
+                            </div>
+                            <div style="background:#eee; height:8px; border-radius:4px; width: 100%;">
+                                <div style="width:${score}%; background:${barColor}; height:100%; border-radius:4px; transition: width 0.5s;"></div>
+                            </div>
+                        </div>`;
+                    }
+                    // ---------------------------
+
+                    const colorClass = (rating.includes('不實') || rating.includes('錯誤')) ? 'rating-false' : 'rating-true';
+                    
+                    h += `
+                    <div class="claim">
+                        <p><strong>陳述：</strong>${c.text}</p>
+                        <p><strong>評等：</strong><span class="${colorClass}">${rating}</span></p>
+                        ${scoreHtml}
+                        <a href="${url}" target="_blank">查看查核報告詳情</a>
+                    </div>`;
                 });
                 resultsContainer.innerHTML = h;
-            } else resultsContainer.innerHTML = '<div class="info">無相關結果。</div>';
+            } else {
+                resultsContainer.innerHTML = '<div class="info">無相關結果。</div>';
+            }
         }).catch(e => resultsContainer.innerHTML = `<div class="error">${e.message}</div>`);
     }
     if(searchBtn) searchBtn.onclick = performSearch;
@@ -67,7 +105,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        // 取得分數
+        // 取得 AI 分數
         let deepfake = 0, general = 0;
         if (type === 'image') {
             deepfake = d.ai_detection ? d.ai_detection.deepfake_score : 0;
@@ -98,12 +136,21 @@ document.addEventListener('DOMContentLoaded', function() {
             <p>可能性：${g_pct}%</p>
         </div>`;
 
-        // 圖片特有的 OCR 查核
+        // 圖片特有的 OCR 查核結果顯示
         if (type === 'image' && d.fact_check) {
             if(d.fact_check.claims && d.fact_check.claims.length) {
-                html += '<hr><h4>文字查核結果：</h4>';
+                html += '<hr><h4>🔍 圖片文字查核結果：</h4>';
                 d.fact_check.claims.forEach(c => {
-                     html += `<div class="claim"><p><strong>評等：</strong>${c.claimReview[0].textualRating}</p><a href="${c.claimReview[0].url}" target="_blank">詳情</a></div>`;
+                     // 這裡也加入分數顯示
+                     const score = c.reliability_score !== undefined ? c.reliability_score : -1;
+                     const label = c.risk_label || '';
+                     let scoreText = '';
+                     if(score !== -1) scoreText = `<br>📊 可信度：${score}% (${label})`;
+
+                     html += `<div class="claim">
+                        <p><strong>評等：</strong>${c.claimReview[0].textualRating}${scoreText}</p>
+                        <a href="${c.claimReview[0].url}" target="_blank">詳情</a>
+                     </div>`;
                 });
             }
         }
