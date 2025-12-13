@@ -42,7 +42,7 @@
 
         <hr>
 
-        <h2>🎬 影片 Deepfake 偵測</h2>
+        <h2>🎬 影片 Deepfake 或 AI 合成影片 偵測</h2>
         <p><strong>選項 1:</strong> 請直接上傳影片檔案進行分析。</p>
         <input type="file" id="video-file-input" accept="video/*" class="input-control">
         <button id="detect-video-btn" class="search-btn">偵測上傳的影片</button>

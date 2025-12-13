@@ -116,7 +116,7 @@ function clearUserState(string $userId): void { $states = file_exists(USER_STATE
 function check_url_existence(string $url): bool { $ch = curl_init($url); curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); curl_setopt($ch, CURLOPT_NOBODY, true); curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10); curl_setopt($ch, CURLOPT_TIMEOUT, 15); curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false); curl_exec($ch); if (curl_errno($ch)) { ($ch); return false; } $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE); ($ch); return ($http_code < 400); }
 function check_url_safety(string $url, string $apiKey): array { $queryParams = http_build_query(['key' => $apiKey, 'uri' => $url]); $threatTypes = ['MALWARE', 'SOCIAL_ENGINEERING', 'UNWANTED_SOFTWARE']; foreach ($threatTypes as $type) { $queryParams .= '&threatTypes=' . urlencode($type); } $apiUrl = 'https://webrisk.googleapis.com/v1/uris:search?' . $queryParams; $response = make_curl_request($apiUrl); if ($response === false) { return ['error' => '無法連接至 Google Web Risk API。']; } $data = json_decode($response, true); if (isset($data['error'])) { return ['error' => $data['error']['message']]; } if (isset($data['threat'])) { return ['safe' => false, 'threat_type' => $data['threat']['threatTypes'][0] ?? 'UNKNOWN']; } return ['safe' => true]; }
 
-// --- 新增：處理熱門議題的函式 ---
+// --- 處理熱門議題的函式 ---
 function handle_hot_topics_response(string|false $apiResponse, string $targetId, LINEBot $bot): void {
     if ($apiResponse === false) {
         $bot->pushMessage($targetId, new TextMessageBuilder("無法連接至資料庫取得熱門議題。"));
@@ -155,6 +155,7 @@ function handle_hot_topics_response(string|false $apiResponse, string $targetId,
 }
 // ------------------------------
 
+// --- 修改：移除 Deepfake，只顯示 AI 生成 ---
 function handle_image_analysis_response(string|false $apiResponse, string $targetId, LINEBot $bot): void {
     if ($apiResponse === false) {
         $bot->pushMessage($targetId, new TextMessageBuilder("抱歉，圖片偵測服務暫時無法連線。"));
@@ -168,19 +169,14 @@ function handle_image_analysis_response(string|false $apiResponse, string $targe
     }
 
     $ai = $data['ai_detection'] ?? [];
-    $d_score = $ai['deepfake_score'] ?? 0;
     $g_score = $ai['general_ai_score'] ?? 0;
-    
-    $d_pct = round($d_score * 100, 1);
     $g_pct = round($g_score * 100, 1);
 
     $msg = "🖼️ 圖片分析結果：\n\n";
-    $msg .= "👤 Deepfake (換臉): {$d_pct}%\n";
-    $msg .= "🤖 AI 生成 (繪圖): {$g_pct}%\n\n";
+    $msg .= "🤖 AI 生成可能性 (AIGC): {$g_pct}%\n\n";
     
-    if ($d_score > 0.5) $msg .= "⚠️ 警告：偵測到人臉變造痕跡！\n";
-    else if ($g_score > 0.5) $msg .= "⚠️ 警告：極高機率為 AI 生成圖像！\n";
-    else $msg .= "✅ 判斷為真實影像。\n";
+    if ($g_score > 0.5) $msg .= "⚠️ 警告：極高機率為 AI 生成圖像！\n";
+    else $msg .= "✅ 判斷為真實/手繪影像。\n";
 
     $factData = $data['fact_check'] ?? null;
     if ($factData && !empty($factData['claims'])) {
@@ -200,6 +196,7 @@ function handle_image_analysis_response(string|false $apiResponse, string $targe
     $bot->pushMessage($targetId, new TextMessageBuilder($msg));
 }
 
+// --- 修改：移除 Deepfake，只顯示 AI 生成 ---
 function handle_video_analysis_response(string|false $apiResponse, string $targetId, LINEBot $bot): void {
     if ($apiResponse === false) {
         $bot->pushMessage($targetId, new TextMessageBuilder("抱歉，影片偵測服務暫時無法連線。"));
@@ -212,19 +209,13 @@ function handle_video_analysis_response(string|false $apiResponse, string $targe
         return;
     }
 
-    $d_score = $data['deepfake_score'] ?? 0;
     $g_score = $data['general_ai_score'] ?? 0;
-    
-    $d_pct = round($d_score * 100, 1);
     $g_pct = round($g_score * 100, 1);
 
     $msg = "🎬 影片分析結果：\n\n";
-    $msg .= "👤 Deepfake 指數: {$d_pct}%\n";
     $msg .= "🤖 AI 生成指數: {$g_pct}%\n";
     
-    if ($d_score > 0.5) {
-        $msg .= "\n⚠️ 結論：疑似 Deepfake 換臉影片。";
-    } elseif ($g_score > 0.5) {
+    if ($g_score > 0.5) {
         $msg .= "\n⚠️ 結論：疑似 AI 生成影片。";
     } else {
         $msg .= "\n✅ 結論：未偵測到明顯 AI 特徵。";
@@ -242,7 +233,7 @@ if (is_array($events) && !empty($events['events'])) {
             $replyToken = $event['replyToken'];
             $source = $event['source'];
             $userId = $source['userId'];
-            $apiUrl = 'https://6d8fb93691c1.ngrok-free.app/api.php';
+            $apiUrl = 'https://b37a56729b1a.ngrok-free.app/api.php';
             $userState = getUserState($userId);
             $targetId = isset($source['groupId']) ? $source['groupId'] : $userId;
 
@@ -293,18 +284,18 @@ if (is_array($events) && !empty($events['events'])) {
                     continue;
                 }
                 if ($trimmedUserMessage === '網站') {
-                    $bot->replyText($replyToken, 'https://6d8fb93691c1.ngrok-free.app/');
+                    $bot->replyText($replyToken, 'https://b37a56729b1a.ngrok-free.app/');
                     continue;
                 }
                 if (has_image_trigger($userMessage)) {
                     setUserState($userId, 'awaiting_image');
-                    $bot->replyText($replyToken, '請傳送圖片。');
+                    $bot->replyText($replyToken, '請傳送圖片。或打「取消」來取消動作。');
                     continue;
                 }
                 
                 if (has_video_trigger($userMessage)) {
                     setUserState($userId, 'awaiting_video');
-                    $bot->replyText($replyToken, '請傳送影片或 YouTube 連結。');
+                    $bot->replyText($replyToken, '請傳送影片或 YouTube 連結。或打「取消」來取消動作。');
                     continue;
                 }
 
@@ -320,7 +311,6 @@ if (is_array($events) && !empty($events['events'])) {
                     continue;
                 }
 
-                // --- 處理「熱門議題」的觸發 ---
                 if ($trimmedUserMessage === '熱門議題' || $trimmedUserMessage === '熱門搜尋' || $trimmedUserMessage === '熱門') {
                     $bot->replyText($replyToken, '正在獲取熱門查核資料...');
                     $postData = ['action' => 'get_hot_searches'];
@@ -329,11 +319,9 @@ if (is_array($events) && !empty($events['events'])) {
                     continue;
                 }
                 
-                // 處理「查一下」文字查核
                 if (should_process_fact_check($userMessage)) {
                     $query = cleanup_message_for_query($userMessage);
                     
-                    // 修改：如果「查一下」後面是空的，也顯示熱門議題
                     if (empty($query)) {
                         $bot->replyText($replyToken, "您輸入了「查一下」但未指定內容，以下是最近的熱門議題：");
                         $postData = ['action' => 'get_hot_searches'];
@@ -342,7 +330,6 @@ if (is_array($events) && !empty($events['events'])) {
                         continue;
                     }
                     
-                    // 呼叫 api.php
                     $postData = ['action' => 'search', 'query' => $query];
                     $apiResponse = make_curl_request($apiUrl, $postData);
                     

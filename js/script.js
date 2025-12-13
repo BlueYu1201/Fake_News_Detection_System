@@ -24,7 +24,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if(d.hot_topics && hotSearchSelect) {
             hotSearchSelect.innerHTML = '<option disabled selected>--- 選擇熱門議題 ---</option>';
             d.hot_topics.forEach(t => {
-                // 如果 API 有回傳分數，可以用來決定顏色，這裡先維持簡單顯示
                 hotSearchSelect.innerHTML += `<option value="${t.claim_text}">[${t.rating}] ${t.claim_text.substr(0,20)}...</option>`;
             });
         }
@@ -47,13 +46,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     const rating = c.claimReview[0].textualRating;
                     const url = c.claimReview[0].url;
                     
-                    // --- 新增：讀取可信度分數 ---
                     const score = c.reliability_score !== undefined ? c.reliability_score : -1;
                     const label = c.risk_label || '';
                     
                     let scoreHtml = '';
                     if (score !== -1) {
-                        // 設定顏色：低分(假)=紅, 中分=黃, 高分(真)=綠
                         let barColor = score < 40 ? '#e74c3c' : (score < 80 ? '#f1c40f' : '#2ecc71');
                         scoreHtml = `
                         <div style="margin: 8px 0;">
@@ -66,7 +63,6 @@ document.addEventListener('DOMContentLoaded', function() {
                             </div>
                         </div>`;
                     }
-                    // ---------------------------
 
                     const colorClass = (rating.includes('不實') || rating.includes('錯誤')) ? 'rating-false' : 'rating-true';
                     
@@ -105,43 +101,33 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        // 取得 AI 分數
-        let deepfake = 0, general = 0;
+        // 只取得 General AI 分數
+        let general = 0;
         if (type === 'image') {
-            deepfake = d.ai_detection ? d.ai_detection.deepfake_score : 0;
             general = d.ai_detection ? d.ai_detection.general_ai_score : 0;
         } else {
-            deepfake = d.deepfake_score;
             general = d.general_ai_score;
         }
 
-        const d_pct = (deepfake * 100).toFixed(1);
         const g_pct = (general * 100).toFixed(1);
 
         let html = `<h3>${type === 'image' ? '🖼️ 圖片' : '🎬 影片'}分析結果</h3>`;
         
-        let d_class = deepfake > 0.5 ? 'rating-false' : 'rating-true';
-        html += `
-        <div class="result-display ${d_class}" style="margin-bottom:10px;">
-            <strong>👤 Deepfake (換臉偵測)</strong>
-            <div class="progress"><div style="width:${d_pct}%; background:${deepfake > 0.5 ? '#e74c3c' : '#2ecc71'}"></div></div>
-            <p>可能性：${d_pct}%</p>
-        </div>`;
-
         let g_class = general > 0.5 ? 'rating-false' : 'rating-true';
         html += `
         <div class="result-display ${g_class}">
-            <strong>🤖 AI 生成 (AIGC偵測)</strong>
+            <strong>🤖 AI 生成偵測 (AIGC)</strong>
             <div class="progress"><div style="width:${g_pct}%; background:${general > 0.5 ? '#e74c3c' : '#2ecc71'}"></div></div>
-            <p>可能性：${g_pct}%</p>
-        </div>`;
+            <p>AI 生成可能性：${g_pct}%</p>
+        </div>
+        <p style="font-size: 0.9em; color: #666; margin-top: 5px;">(數值越低代表越像真實拍攝/手繪；數值越高代表越像 AI 生成)</p>
+        `;
 
         // 圖片特有的 OCR 查核結果顯示
         if (type === 'image' && d.fact_check) {
             if(d.fact_check.claims && d.fact_check.claims.length) {
                 html += '<hr><h4>🔍 圖片文字查核結果：</h4>';
                 d.fact_check.claims.forEach(c => {
-                     // 這裡也加入分數顯示
                      const score = c.reliability_score !== undefined ? c.reliability_score : -1;
                      const label = c.risk_label || '';
                      let scoreText = '';
